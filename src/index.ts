@@ -1,8 +1,7 @@
-import type { SessionStorage } from '@remix-run/server-runtime'
-import { redirect } from '@remix-run/server-runtime'
 import crypto from 'crypto-js'
-import type { AuthenticateOptions, StrategyVerifyCallback } from 'remix-auth'
-import { Strategy } from 'remix-auth'
+import type { SessionStorage } from 'react-router'
+import { redirect } from 'react-router'
+import { Strategy } from 'remix-auth/strategy'
 
 export type SendEmailOptions<User> = {
   emailAddress: string
@@ -45,10 +44,40 @@ export type MagicLinkPayload = {
 }
 
 /**
+ * This interface declares the session data that is required for this package
+ *  to store the following details.
+ */
+type MagicLinkSessionData<User> = {
+  /**
+   * The magic link URL that was sent to the user's email.
+   */
+  magicLink: string
+  /**
+   * The email address used for authentication.
+   */
+  email: string
+  /**
+   * The authenticated user object.
+   */
+  user: User
+}
+
+/**
+ * This interface declares the session flash data that is required for this package
+ *  to store the following details.
+ */
+type MagicLinkSessionFlashData = {
+  /**
+   * The error message to display to the user.
+   */
+  error: string
+}
+
+/**
  * This interface declares what configuration the strategy needs from the
  * developer to correctly work.
  */
-export type EmailLinkStrategyOptions<User> = {
+export type EmailLinkStrategyOptions<User, SessionData, SessionFlashData> = {
   /**
    * The endpoint the user will go after clicking on the email link.
    * A whole URL is not required, the pathname is enough, the strategy will
@@ -90,27 +119,27 @@ export type EmailLinkStrategyOptions<User> = {
    */
   linkExpirationTime?: number
   /**
-   * The key on the session to store any error message.
-   * @default "auth:error"
-   */
-  sessionErrorKey?: string
-  /**
-   * The key on the session to store the magic link.
-   * @default "auth:magiclink"
-   */
-  sessionMagicLinkKey?: string
-  /**
    * Add an extra layer of protection and validate the magic link is valid.
    * @default false
    */
   validateSessionMagicLink?: boolean
-
   /**
-   * The key on the session to store the email.
-   * It's unset the same time the sessionMagicLinkKey is.
-   * @default "auth:email"
+   * The URL to redirect to after successful authentication.
    */
-  sessionEmailKey?: string
+  successRedirect: string
+  /**
+   * The URL to redirect to after failed authentication.
+   */
+  failureRedirect: string
+  /**
+   * The session storage to use for the strategy.
+   */
+  sessionStorage: SessionStorage<
+    SessionData extends MagicLinkSessionData<User> ? SessionData : never,
+    SessionFlashData extends MagicLinkSessionFlashData
+      ? SessionFlashData
+      : never
+  >
 }
 
 /**
@@ -132,10 +161,11 @@ const verifyEmailAddress: VerifyEmailFunction = async (email) => {
   }
 }
 
-export class EmailLinkStrategy<User> extends Strategy<
+export class EmailLinkStrategy<
   User,
-  EmailLinkStrategyVerifyParams
-> {
+  SessionData,
+  SessionFlashData
+> extends Strategy<User, EmailLinkStrategyVerifyParams> {
   public name = 'email-link'
 
   private readonly emailField: string = 'email'
@@ -152,38 +182,39 @@ export class EmailLinkStrategy<User> extends Strategy<
 
   private readonly linkExpirationTime: number
 
-  private readonly sessionErrorKey: string
-
-  private readonly sessionMagicLinkKey: string
-
   private readonly validateSessionMagicLink: boolean
 
-  private readonly sessionEmailKey: string
+  private readonly successRedirect: string
+
+  private readonly failureRedirect: string
+
+  private readonly sessionStorage: SessionStorage<
+    SessionData extends MagicLinkSessionData<User> ? SessionData : never,
+    SessionFlashData extends MagicLinkSessionFlashData
+      ? SessionFlashData
+      : never
+  >
 
   constructor(
-    options: EmailLinkStrategyOptions<User>,
-    verify: StrategyVerifyCallback<User, EmailLinkStrategyVerifyParams>
+    options: EmailLinkStrategyOptions<User, SessionData, SessionFlashData>,
+    verify: Strategy.VerifyFunction<User, EmailLinkStrategyVerifyParams>
   ) {
     super(verify)
     this.sendEmail = options.sendEmail
     this.callbackURL = options.callbackURL ?? '/magic'
     this.secret = options.secret
-    this.sessionErrorKey = options.sessionErrorKey ?? 'auth:error'
-    this.sessionMagicLinkKey = options.sessionMagicLinkKey ?? 'auth:magiclink'
     this.validateEmail = options.verifyEmailAddress ?? verifyEmailAddress
     this.emailField = options.emailField ?? this.emailField
     this.magicLinkSearchParam = options.magicLinkSearchParam ?? 'token'
     this.linkExpirationTime = options.linkExpirationTime ?? 1000 * 60 * 30 // 30 minutes
     this.validateSessionMagicLink = options.validateSessionMagicLink ?? false
-    this.sessionEmailKey = options.sessionEmailKey ?? 'auth:email'
+    this.successRedirect = options.successRedirect
+    this.failureRedirect = options.failureRedirect
+    this.sessionStorage = options.sessionStorage
   }
 
-  public async authenticate(
-    request: Request,
-    sessionStorage: SessionStorage,
-    options: AuthenticateOptions
-  ): Promise<User> {
-    const session = await sessionStorage.getSession(
+  public async authenticate(request: Request): Promise<User> {
+    const session = await this.sessionStorage.getSession(
       request.headers.get('Cookie')
     )
 
@@ -197,24 +228,15 @@ export class EmailLinkStrategy<User> extends Strategy<
 
     // This should only be called in an action if it's used to start the login process
     if (request.method === 'POST') {
-      if (!options.successRedirect) {
-        throw new Error(
-          'Missing successRedirect. The successRedirect is required for POST requests.'
-        )
-      }
-
       // get the email address from the request body
       const emailAddress = form.get(this.emailField)
 
       // if it doesn't have an email address,
       if (!emailAddress || typeof emailAddress !== 'string') {
         const message = 'Missing email address.'
-        if (!options.failureRedirect) {
-          throw new Error(message)
-        }
-        session.flash(this.sessionErrorKey, { message })
-        const cookie = await sessionStorage.commitSession(session)
-        throw redirect(options.failureRedirect, {
+        session.flash('error', message)
+        const cookie = await this.sessionStorage.commitSession(session)
+        throw redirect(this.failureRedirect, {
           headers: { 'Set-Cookie': cookie },
         })
       }
@@ -231,12 +253,12 @@ export class EmailLinkStrategy<User> extends Strategy<
           formData
         )
 
-        session.set(this.sessionMagicLinkKey, await this.encrypt(magicLink))
-        session.set(this.sessionEmailKey, emailAddress)
+        session.set('magicLink', await this.encrypt(magicLink))
+        session.set('email', emailAddress)
 
-        throw redirect(options.successRedirect, {
+        throw redirect(this.successRedirect, {
           headers: {
-            'Set-Cookie': await sessionStorage.commitSession(session),
+            'Set-Cookie': await this.sessionStorage.commitSession(session),
           },
         })
       } catch (error) {
@@ -245,13 +267,10 @@ export class EmailLinkStrategy<User> extends Strategy<
           // If it's a redirect, then just throw the redirect as it is
           throw error
         }
-        if (!options.failureRedirect) {
-          throw error
-        }
         const { message } = error as Error
-        session.flash(this.sessionErrorKey, { message })
-        const cookie = await sessionStorage.commitSession(session)
-        throw redirect(options.failureRedirect, {
+        session.flash('error', message)
+        const cookie = await this.sessionStorage.commitSession(session)
+        throw redirect(this.failureRedirect, {
           headers: { 'Set-Cookie': cookie },
         })
       }
@@ -261,39 +280,29 @@ export class EmailLinkStrategy<User> extends Strategy<
 
     try {
       // If we get here, the user clicked on the magic link inside email
-      const magicLink = session.get(this.sessionMagicLinkKey) ?? ''
+      const magicLink = session.get('magicLink') ?? ''
       const { emailAddress: email, form } = await this.validateMagicLink(
         request.url,
-        await this.decrypt(magicLink)
+        await this.decrypt(magicLink as string)
       )
       // now that we have the user email we can call verify to get the user
       user = await this.verify({ email, form, magicLinkVerify: true })
     } catch (error) {
-      // if something happens, we should redirect to the failureRedirect
-      // and flash the error message, or just throw the error if failureRedirect
-      // is not defined
-      if (!options.failureRedirect) {
-        throw error
-      }
       const { message } = error as Error
-      session.flash(this.sessionErrorKey, { message })
-      const cookie = await sessionStorage.commitSession(session)
-      throw redirect(options.failureRedirect, {
+      session.flash('error', message)
+      const cookie = await this.sessionStorage.commitSession(session)
+      throw redirect(this.failureRedirect, {
         headers: { 'Set-Cookie': cookie },
       })
     }
 
-    if (!options.successRedirect) {
-      return user
-    }
-
     // remove the magic link and email from the session
-    session.unset(this.sessionMagicLinkKey)
-    session.unset(this.sessionEmailKey)
+    session.unset('magicLink')
+    session.unset('email')
 
-    session.set(options.sessionKey, user)
-    const cookie = await sessionStorage.commitSession(session)
-    throw redirect(options.successRedirect, {
+    session.set('user', user)
+    const cookie = await this.sessionStorage.commitSession(session)
+    throw redirect(this.successRedirect, {
       headers: { 'Set-Cookie': cookie },
     })
   }
