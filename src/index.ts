@@ -124,6 +124,10 @@ export type EmailLinkStrategyOptions<User, SessionData, SessionFlashData> = {
    */
   validateSessionMagicLink?: boolean
   /**
+   * The URL to redirect to after sending the email.
+   */
+  emailSentRedirect: string
+  /**
    * The URL to redirect to after successful authentication.
    */
   successRedirect: string
@@ -184,6 +188,8 @@ export class EmailLinkStrategy<
 
   private readonly validateSessionMagicLink: boolean
 
+  private readonly emailSentRedirect: string
+
   private readonly successRedirect: string
 
   private readonly failureRedirect: string
@@ -208,6 +214,7 @@ export class EmailLinkStrategy<
     this.magicLinkSearchParam = options.magicLinkSearchParam ?? 'token'
     this.linkExpirationTime = options.linkExpirationTime ?? 1000 * 60 * 30 // 30 minutes
     this.validateSessionMagicLink = options.validateSessionMagicLink ?? false
+    this.emailSentRedirect = options.emailSentRedirect
     this.successRedirect = options.successRedirect
     this.failureRedirect = options.failureRedirect
     this.sessionStorage = options.sessionStorage
@@ -256,7 +263,7 @@ export class EmailLinkStrategy<
         session.set('magicLink', await this.encrypt(magicLink))
         session.set('email', emailAddress)
 
-        throw redirect(this.successRedirect, {
+        throw redirect(this.emailSentRedirect, {
           headers: {
             'Set-Cookie': await this.sessionStorage.commitSession(session),
           },
